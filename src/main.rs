@@ -9,8 +9,6 @@ use std::{
     usize,
 };
 
-const JUMP: usize = 5;
-
 struct Stats {
     min: f32,
     max: f32,
@@ -55,7 +53,7 @@ fn main() {
     let mut i = 0;
     let mut cities_stats: BTreeMap<&[u8], Stats> = BTreeMap::new();
     while i < num_chunks {
-        if let Ok(work) = rx.try_recv() {
+        if let Ok(work) = rx.recv() {
             for (city, stats) in work {
                 if cities_stats.contains_key(city) {
                     let global_stats = cities_stats.get_mut(city).unwrap();
@@ -117,57 +115,22 @@ fn chunks(buffer: &[u8], num_threads: usize) -> Vec<&[u8]> {
 
 #[inline(always)]
 fn parse_next_row(slice: &[u8]) -> (&[u8], f32, usize) {
-    let mut i = JUMP;
-    let mut end_city = 0;
-    let mut end_measure = 0;
-    loop {
-        match slice[i] {
-            b';' => {
-                // found the end of the city
-                end_city = i;
-                i += 1;
-            }
-            b'\n' => {
-                // found the end of the measure
-                end_measure = i;
-                i -= 1;
-            }
-            b'0' | b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8' | b'9' | b'.' => {
-                let mut c = i;
-                let mut m = i;
-                loop {
-                    if end_city == 0 {
-                        // find the end of the city
-                        c -= 1;
-                        if slice[c] == b';' {
-                            end_city = c;
-                        }
-                    }
-                    if end_measure == 0 {
-                        // find the end of the city
-                        m += 1;
-                        if m >= slice.len() || slice[m] == b'\n' {
-                            end_measure = m;
-                        }
-                    }
-
-                    if end_city != 0 && end_measure != 0 {
-                        return (
-                            &slice[0..end_city],
-                            std::str::from_utf8(&slice[end_city + 1..end_measure])
-                                .unwrap()
-                                .parse()
-                                .unwrap(),
-                            end_measure + 1,
-                        );
-                    }
-                }
-            }
-            _ => {
-                i += JUMP;
-            }
-        }
+    let mut i = 0;
+    while slice[i] != b';' {
+        i += 1;
     }
+    let end_city = i;
+    while i < slice.len() && slice[i] != b'\n' {
+        i += 1;
+    }
+    return (
+        &slice[0..end_city],
+        std::str::from_utf8(&slice[end_city + 1..i])
+            .unwrap()
+            .parse()
+            .unwrap(),
+        i + 1,
+    );
 }
 
 #[cfg(test)]
@@ -191,7 +154,6 @@ Istanbul;23.0"#
     #[test]
     fn it_chunks_content() {
         let content = content();
-        dbg!(content.len());
         assert_eq!(
             vec![
                 r#"Hamburg;12.0
