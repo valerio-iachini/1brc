@@ -1,7 +1,8 @@
 use memmap2::Mmap;
 use once_cell::sync::Lazy;
+use rustc_hash::FxHashMap;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fs::File,
     io::Write,
     sync::mpsc::channel,
@@ -30,7 +31,7 @@ fn main() {
     for chunk in chunks {
         let tx = tx.clone();
         thread::spawn(move || {
-            let mut cities_stats: HashMap<&[u8], Stats> = HashMap::new();
+            let mut cities_stats: FxHashMap<&[u8], Stats> = FxHashMap::default();
             let mut i = 0;
             while i < chunk.len() {
                 let (city, measure, last) = parse_next_row(&chunk[i..]);
