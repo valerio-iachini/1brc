@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 memmap2 = "0.9.4"
 once_cell = "1.19.0"
+rustc-hash = "1.1.0"
