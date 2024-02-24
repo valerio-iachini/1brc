@@ -5,7 +5,7 @@ use std::{
     fs::File,
     io::Write,
     sync::mpsc::channel,
-    thread::{self, available_parallelism, JoinHandle},
+    thread::{self, available_parallelism},
     usize,
 };
 
@@ -23,14 +23,15 @@ static BUFFER: Lazy<Mmap> = Lazy::new(|| {
     unsafe { Mmap::map(&file).unwrap() }
 });
 
-
 fn main() {
     let num_threads = available_parallelism().unwrap().get();
     let (tx, rx) = channel();
-    let mut threads_handles: Vec<JoinHandle<()>> = vec![];
-    for chunk in chunks(&BUFFER, num_threads) {
+    let chunks = chunks(&BUFFER, num_threads);
+    let num_chunks = chunks.len();
+
+    for chunk in chunks {
         let tx = tx.clone();
-        let handle = thread::spawn(move || {
+        thread::spawn(move || {
             let mut cities_stats: HashMap<&[u8], Stats> = HashMap::new();
             let mut i = 0;
             while i < chunk.len() {
@@ -49,17 +50,11 @@ fn main() {
             }
             tx.send(cities_stats).unwrap();
         });
-        threads_handles.push(handle);
-    }
-
-    while threads_handles.len() > 0 {
-        let cur_thread = threads_handles.remove(0); // moves it into cur_thread
-        cur_thread.join().unwrap();
     }
 
     let mut i = 0;
     let mut cities_stats: BTreeMap<&[u8], Stats> = BTreeMap::new();
-    while i < num_threads {
+    while i < num_chunks {
         if let Ok(work) = rx.try_recv() {
             for (city, stats) in work {
                 if cities_stats.contains_key(city) {
@@ -75,7 +70,7 @@ fn main() {
             i += 1;
         }
     }
-    
+
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
     write!(lock, "{{").unwrap();
@@ -92,14 +87,14 @@ fn main() {
         .unwrap();
         c += 1;
         if c != cities_stats.len() {
-            write!(lock, ",").unwrap();
+            write!(lock, ", ").unwrap();
         }
     }
     write!(lock, "}}").unwrap();
 }
 
 #[inline(always)]
-fn chunks<'a>(buffer: &'a[u8], num_threads: usize) -> Vec<&'a[u8]> {
+fn chunks(buffer: &[u8], num_threads: usize) -> Vec<&[u8]> {
     let mut result = vec![];
     let chunk_size = buffer.len() / num_threads;
     let mut i = 0;
