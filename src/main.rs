@@ -1,5 +1,5 @@
+use lazy_static::lazy_static;
 use memmap2::Mmap;
-use once_cell::sync::Lazy;
 use rustc_hash::{FxHashMap, FxHasher};
 use std::{
     collections::BTreeMap,
@@ -19,10 +19,10 @@ struct Stats {
     count: usize,
 }
 
-static BUFFER: Lazy<Mmap> = Lazy::new(|| {
-    let file = File::open("measurements.txt").unwrap();
-    unsafe { Mmap::map(&file).unwrap() }
-});
+lazy_static! {
+    static ref BUFFER: Mmap =
+        unsafe { Mmap::map(&File::open("measurements.txt").unwrap()).unwrap() };
+}
 
 fn main() {
     let num_threads = 10 * available_parallelism().unwrap().get();
@@ -143,7 +143,7 @@ fn parse_next_row(slice: &[u8]) -> (&[u8], i32, usize) {
     measure = 10 * measure + (slice[i] - b'0') as i32;
     i += 1;
 
-    return (&slice[0..end_city], measure, i + 1);
+    (&slice[0..end_city], measure, i + 1)
 }
 
 #[cfg(test)]
