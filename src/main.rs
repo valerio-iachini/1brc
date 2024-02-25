@@ -2,12 +2,7 @@ use memmap2::Mmap;
 use once_cell::sync::Lazy;
 use rustc_hash::FxHashMap;
 use std::{
-    collections::BTreeMap,
-    fs::File,
-    io::Write,
-    sync::mpsc::channel,
-    thread::{self, available_parallelism},
-    usize,
+    collections::BTreeMap, fs::File, io::Write, sync::mpsc::channel, thread::{self, available_parallelism}, time::Instant, usize
 };
 
 struct Stats {
@@ -23,11 +18,12 @@ static BUFFER: Lazy<Mmap> = Lazy::new(|| {
 });
 
 fn main() {
-    let num_threads = available_parallelism().unwrap().get();
+    let num_threads = 10 * available_parallelism().unwrap().get();
     let (tx, rx) = channel();
     let chunks = chunks(&BUFFER, num_threads);
     let num_chunks = chunks.len();
 
+    let time = Instant::now();
     for chunk in chunks {
         let tx = tx.clone();
         thread::spawn(move || {
@@ -90,6 +86,7 @@ fn main() {
         }
     }
     write!(lock, "}}").unwrap();
+    writeln!(lock, "{:?}", time.elapsed()).unwrap();
 }
 
 #[inline(always)]
