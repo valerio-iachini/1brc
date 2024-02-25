@@ -1,14 +1,21 @@
 use memmap2::Mmap;
 use once_cell::sync::Lazy;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHasher};
 use std::{
-    collections::BTreeMap, fs::File, io::Write, sync::mpsc::channel, thread::{self, available_parallelism}, time::Instant, usize
+    collections::BTreeMap,
+    fs::File,
+    hash::BuildHasherDefault,
+    io::Write,
+    sync::mpsc::channel,
+    thread::{self, available_parallelism},
+    time::Instant,
+    usize,
 };
 
 struct Stats {
-    min: f32,
-    max: f32,
-    avg: f32,
+    min: i32,
+    max: i32,
+    sum: i32,
     count: usize,
 }
 
@@ -27,20 +34,21 @@ fn main() {
     for chunk in chunks {
         let tx = tx.clone();
         thread::spawn(move || {
-            let mut cities_stats: FxHashMap<&[u8], Stats> = FxHashMap::default();
+            let mut cities_stats: FxHashMap<&[u8], Stats> =
+                FxHashMap::with_capacity_and_hasher(100, BuildHasherDefault::<FxHasher>::default());
             let mut i = 0;
             while i < chunk.len() {
                 let (city, measure, last) = parse_next_row(&chunk[i..]);
                 let stats = cities_stats.entry(city).or_insert(Stats {
-                    min: f32::MAX,
-                    max: f32::MIN,
-                    avg: 0.0,
+                    min: i32::MAX,
+                    max: i32::MIN,
+                    sum: 0,
                     count: 0,
                 });
                 stats.min = measure.min(stats.min);
                 stats.max = measure.max(stats.max);
-                stats.avg = ((stats.avg * stats.count as f32) + measure) / (stats.count + 1) as f32;
                 stats.count += 1;
+                stats.sum += measure;
                 i += last;
             }
             tx.send(cities_stats).unwrap();
@@ -56,7 +64,7 @@ fn main() {
                     let global_stats = cities_stats.get_mut(city).unwrap();
                     global_stats.min = stats.min.min(global_stats.min);
                     global_stats.max = stats.max.max(global_stats.max);
-                    global_stats.avg = (stats.avg + global_stats.avg) / 2.0;
+                    global_stats.sum += stats.sum;
                     global_stats.count += stats.count;
                 } else {
                     cities_stats.insert(city, stats);
@@ -73,11 +81,11 @@ fn main() {
     for (city, stats) in &cities_stats {
         write!(
             lock,
-            "{}={}/{}/{}",
+            "{}={}/{:.2}/{}",
             std::str::from_utf8(city).unwrap(),
-            stats.min,
-            stats.avg,
-            stats.max
+            stats.min as f32 / 10.0,
+            stats.sum as f32 / stats.count as f32 / 10.0,
+            stats.max as f32 / 10.0
         )
         .unwrap();
         c += 1;
@@ -112,28 +120,36 @@ fn chunks(buffer: &[u8], num_threads: usize) -> Vec<&[u8]> {
 }
 
 #[inline(always)]
-fn parse_next_row(slice: &[u8]) -> (&[u8], f32, usize) {
+fn parse_next_row(slice: &[u8]) -> (&[u8], i32, usize) {
     let mut i = 0;
     while slice[i] != b';' {
         i += 1;
     }
     let end_city = i;
-    while i < slice.len() && slice[i] != b'\n' {
+    i += 1;
+    let sign: i32 = if slice[i] == b'-' {
+        i += 1;
+        -1
+    } else {
+        1
+    };
+    let mut measure = sign * (slice[i] - b'0') as i32;
+    i += 1;
+    if slice[i] != b'.' {
+        measure = measure * 10 + (slice[i] - b'0') as i32;
         i += 1;
     }
-    return (
-        &slice[0..end_city],
-        std::str::from_utf8(&slice[end_city + 1..i])
-            .unwrap()
-            .parse()
-            .unwrap(),
-        i + 1,
-    );
+    i += 1;
+    measure = 10 * measure + (slice[i] - b'0') as i32;
+    i += 1;
+
+    return (&slice[0..end_city], measure, i + 1);
 }
 
 #[cfg(test)]
 mod test {
     use crate::{chunks, parse_next_row};
+    use pretty_assertions::assert_eq;
 
     fn content() -> &'static [u8] {
         r#"Hamburg;12.0
@@ -176,7 +192,7 @@ Istanbul;23.0"#
     fn it_parses_row() {
         let content = content();
 
-        let mut result: Vec<(&[u8], f32)> = vec![];
+        let mut result: Vec<(&[u8], i32)> = vec![];
         let mut i = 0;
         while i < content.len() {
             let (city, measure, last) = parse_next_row(&content[i..]);
@@ -186,16 +202,16 @@ Istanbul;23.0"#
 
         assert_eq!(
             vec![
-                ("Hamburg".as_bytes(), 12.0f32),
-                ("Bulawayo".as_bytes(), 8.9f32),
-                ("Palembang".as_bytes(), 38.8f32),
-                ("St. John's".as_bytes(), 15.2f32),
-                ("Cracow".as_bytes(), 12.6f32),
-                ("Bridgetown".as_bytes(), 26.9f32),
-                ("Istanbul".as_bytes(), 6.2f32),
-                ("Roseau".as_bytes(), 34.4f32),
-                ("Conakry".as_bytes(), 31.2f32),
-                ("Istanbul".as_bytes(), 23.0f32),
+                ("Hamburg".as_bytes(), 120),
+                ("Bulawayo".as_bytes(), 89),
+                ("Palembang".as_bytes(), 388),
+                ("St. John's".as_bytes(), 152),
+                ("Cracow".as_bytes(), 126),
+                ("Bridgetown".as_bytes(), 269),
+                ("Istanbul".as_bytes(), 62),
+                ("Roseau".as_bytes(), 344),
+                ("Conakry".as_bytes(), 312),
+                ("Istanbul".as_bytes(), 230),
             ],
             result
         );
