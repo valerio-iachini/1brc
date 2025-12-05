@@ -9,8 +9,7 @@ use std::{
     io::Write,
     simd::{cmp::SimdPartialEq, num::SimdUint, u8x64, u8x8},
     sync::mpsc::channel,
-    thread,
-    time::Instant,
+    thread::{self, available_parallelism},
 };
 
 struct Stats {
@@ -37,10 +36,9 @@ fn main() {
 
 #[cfg(feature = "multi_thread")]
 fn multi_thread() {
-    let time = Instant::now();
-    let cache_size = 40_000;
+    let num_threads = 10 * available_parallelism().unwrap().get();
     let (tx, rx) = channel();
-    let chunks = chunks(&BUFFER, cache_size);
+    let chunks = chunks(&BUFFER, BUFFER.len() / num_threads);
     let num_chunks = chunks.len();
 
     for chunk in chunks {
@@ -106,12 +104,10 @@ fn multi_thread() {
         }
     }
     write!(lock, "}}").unwrap();
-    writeln!(lock, "{:?}", time.elapsed()).unwrap();
 }
 
 #[cfg(feature = "single_thread")]
 fn single_thread() {
-    let time = Instant::now();
     let mut cities_stats: FxHashMap<&[u8], Stats> =
         FxHashMap::with_capacity_and_hasher(500, BuildHasherDefault::<FxHasher>::default());
     let mut i = 0;
@@ -151,7 +147,6 @@ fn single_thread() {
         }
     }
     write!(lock, "}}").unwrap();
-    writeln!(lock, "{:?}", time.elapsed()).unwrap();
 }
 
 #[inline(always)]
@@ -183,11 +178,13 @@ fn find_new_line_in_chunk(chunk: &[u8]) -> (bool, u8) {
 #[inline(always)]
 fn find_new_line_pos(remaning: &[u8]) -> usize {
     let (found1, pos1) = find_new_line_in_chunk(remaning);
-    let (found2, pos2) = find_new_line_in_chunk(&remaning[64.min(remaning.len())..remaning.len()]);
+    ((found1 as u8 * pos1) | ((!found1) as u8 * remaning.len() as u8)) as usize
 
-    ((found1 as u8 * pos1)
-        | ((!found1) as u8 * found2 as u8 * pos2)
-        | ((!found1) as u8 * (!found2) as u8 * remaning.len() as u8)) as usize
+    //   let (found2, pos2) = find_new_line_in_chunk(&remaning[64.min(remaning.len())..remaning.len()]);
+
+    //   ((found1 as u8 * pos1)
+    //       | ((!found1) as u8 * found2 as u8 * pos2)
+    //       | ((!found1) as u8 * (!found2) as u8 * remaning.len() as u8)) as usize
 }
 
 #[inline(always)]
