@@ -10,13 +10,7 @@ panic = "abort"
 debug = true
 
 [dependencies]
-lazy_static = "1.4.0"
 memmap2 = "0.9.4"
-rustc-hash = "1.1.0"
 
 [dev-dependencies]
 pretty_assertions = "1.4.0"
-
-[features]
-single_thread = []
-multi_thread = []

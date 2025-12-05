@@ -1,16 +1,18 @@
 #![feature(portable_simd)]
-use lazy_static::lazy_static;
+#![feature(hasher_prefixfree_extras)]
 use memmap2::Mmap;
-use rustc_hash::{FxHashMap, FxHasher};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs::File,
-    hash::BuildHasherDefault,
+    hash::{BuildHasher, Hasher},
     io::Write,
     simd::{cmp::SimdPartialEq, num::SimdUint, u8x64, u8x8},
     sync::mpsc::channel,
-    thread::{self, available_parallelism},
+    thread::available_parallelism,
 };
+
+const SEMI: u8x8 = u8x8::splat(b';');
+const NEWL: u8x64 = u8x64::splat(b'\n');
 
 struct Stats {
     min: i16,
@@ -19,57 +21,71 @@ struct Stats {
     count: u32,
 }
 
-lazy_static! {
-    static ref BUFFER: Mmap =
-        unsafe { Mmap::map(&File::open("measurements.txt").unwrap()).unwrap() };
+struct FastHasherBuilder;
+struct FastHasher(u64);
+
+impl BuildHasher for FastHasherBuilder {
+    type Hasher = FastHasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        FastHasher(0xcbf29ce484222325)
+    }
+}
+
+impl Hasher for FastHasher {
+    fn finish(&self) -> u64 {
+        self.0 ^ self.0.rotate_right(33) ^ self.0.rotate_right(15)
+    }
+
+    fn write_length_prefix(&mut self, _len: usize) {}
+
+    fn write(&mut self, bytes: &[u8]) {
+        let mut word = [0u64; 2];
+        unsafe {
+            std::ptr::copy(
+                bytes.as_ptr(),
+                word.as_mut_ptr().cast::<u8>(),
+                bytes.len().min(16),
+            )
+        };
+        self.0 = word[0] ^ word[1];
+    }
 }
 
 fn main() {
-    #[cfg(all(feature = "single_thread", feature = "multi_thread"))]
-    compile_error!("features `single_thread` and `multi_thread` are mutually exclusive");
-
-    #[cfg(feature = "single_thread")]
-    single_thread();
-    #[cfg(feature = "multi_thread")]
-    multi_thread();
-}
-
-#[cfg(feature = "multi_thread")]
-fn multi_thread() {
-    let num_threads = 10 * available_parallelism().unwrap().get();
-    let (tx, rx) = channel();
-    let chunks = chunks(&BUFFER, BUFFER.len() / num_threads);
-    let num_chunks = chunks.len();
-
-    for chunk in chunks {
-        let tx = tx.clone();
-        thread::spawn(move || {
-            let mut cities_stats: FxHashMap<&[u8], Stats> =
-                FxHashMap::with_capacity_and_hasher(100, BuildHasherDefault::<FxHasher>::default());
-            let mut i = 0;
-            while i < chunk.len() {
-                let (city, measure, last) = parse_next_row(&chunk[i..]);
-                let stats = cities_stats.entry(city).or_insert(Stats {
-                    min: i16::MAX,
-                    max: i16::MIN,
-                    sum: 0,
-                    count: 0,
-                });
-                stats.min = measure.min(stats.min);
-                stats.max = measure.max(stats.max);
-                stats.count += 1;
-                stats.sum += measure as i32;
-                i += last;
-            }
-            tx.send(cities_stats).unwrap();
-        });
-    }
-
-    let mut i = 0;
     let mut cities_stats: BTreeMap<&[u8], Stats> = BTreeMap::new();
-    while i < num_chunks {
-        if let Ok(work) = rx.recv() {
-            for (city, stats) in work {
+    let map = unsafe { Mmap::map(&File::open("measurements.txt").unwrap()).unwrap() };
+    std::thread::scope(|scope| {
+        let num_threads = available_parallelism().unwrap().get();
+        let (tx, rx) = channel();
+        let chunks = chunks(&map, map.len() / num_threads);
+
+        for chunk in chunks {
+            let tx = tx.clone();
+            scope.spawn(move || {
+                let mut cities_stats = HashMap::with_capacity_and_hasher(1_024, FastHasherBuilder);
+                let mut i = 0;
+                while i < chunk.len() {
+                    let (city, measure, last) = parse_next_row(&chunk[i..]);
+                    let stats = cities_stats.entry(city).or_insert(Stats {
+                        min: i16::MAX,
+                        max: i16::MIN,
+                        sum: 0,
+                        count: 0,
+                    });
+                    stats.min = measure.min(stats.min);
+                    stats.max = measure.max(stats.max);
+                    stats.count += 1;
+                    stats.sum += measure as i32;
+                    i += last;
+                }
+                tx.send(cities_stats).unwrap();
+            });
+        }
+        drop(tx);
+
+        for one_stat in rx {
+            for (city, stats) in one_stat {
                 if cities_stats.contains_key(city) {
                     let global_stats = cities_stats.get_mut(city).unwrap();
                     global_stats.min = stats.min.min(global_stats.min);
@@ -80,52 +96,8 @@ fn multi_thread() {
                     cities_stats.insert(city, stats);
                 }
             }
-            i += 1;
         }
-    }
-
-    let stdout = std::io::stdout();
-    let mut lock = stdout.lock();
-    write!(lock, "{{").unwrap();
-    let mut c = 0;
-    for (city, stats) in &cities_stats {
-        write!(
-            lock,
-            "{}={}/{:.2}/{}",
-            unsafe { std::str::from_utf8_unchecked(city) },
-            stats.min as f32 / 10.0,
-            stats.sum as f32 / stats.count as f32 / 10.0,
-            stats.max as f32 / 10.0
-        )
-        .unwrap();
-        c += 1;
-        if c != cities_stats.len() {
-            write!(lock, ", ").unwrap();
-        }
-    }
-    write!(lock, "}}").unwrap();
-}
-
-#[cfg(feature = "single_thread")]
-fn single_thread() {
-    let mut cities_stats: FxHashMap<&[u8], Stats> =
-        FxHashMap::with_capacity_and_hasher(500, BuildHasherDefault::<FxHasher>::default());
-    let mut i = 0;
-
-    while i < BUFFER.len() {
-        let (city, measure, last) = parse_next_row(&BUFFER[i..]);
-        let stats = cities_stats.entry(city).or_insert(Stats {
-            min: i16::MAX,
-            max: i16::MIN,
-            sum: 0,
-            count: 0,
-        });
-        stats.min = measure.min(stats.min);
-        stats.max = measure.max(stats.max);
-        stats.count += 1;
-        stats.sum += measure as i32;
-        i += last;
-    }
+    });
 
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
@@ -156,7 +128,7 @@ fn chunks(buffer: &[u8], chunk_size: usize) -> Vec<&[u8]> {
     while i <= buffer.len() {
         let s = i;
         i = (i + chunk_size).min(buffer.len());
-        i += find_new_line_pos(&buffer[i..]);
+        i += next_newline(&buffer[i..]);
         result.push(&buffer[s..i]);
         i += 1;
     }
@@ -165,10 +137,10 @@ fn chunks(buffer: &[u8], chunk_size: usize) -> Vec<&[u8]> {
 }
 
 #[inline(always)]
-fn find_new_line_in_chunk(chunk: &[u8]) -> (bool, u8) {
+fn next_newline_part(chunk: &[u8]) -> (bool, u8) {
     let chunk = u8x64::load_or_default(chunk);
 
-    let bm = chunk.simd_eq(u8x64::splat(b'\n')).to_bitmask();
+    let bm = chunk.simd_eq(NEWL).to_bitmask();
     let pos = bm.trailing_zeros() as u8;
     let found = bm != 0;
 
@@ -176,31 +148,23 @@ fn find_new_line_in_chunk(chunk: &[u8]) -> (bool, u8) {
 }
 
 #[inline(always)]
-fn find_new_line_pos(remaning: &[u8]) -> usize {
-    let (found1, pos1) = find_new_line_in_chunk(remaning);
-    ((found1 as u8 * pos1) | ((!found1) as u8 * remaning.len() as u8)) as usize
+fn next_newline(remaning: &[u8]) -> usize {
+    let (found1, pos1) = next_newline_part(remaning);
+    let (found2, pos2) = next_newline_part(&remaning[64.min(remaning.len())..remaning.len()]);
 
-    //   let (found2, pos2) = find_new_line_in_chunk(&remaning[64.min(remaning.len())..remaning.len()]);
-
-    //   ((found1 as u8 * pos1)
-    //       | ((!found1) as u8 * found2 as u8 * pos2)
-    //       | ((!found1) as u8 * (!found2) as u8 * remaning.len() as u8)) as usize
+    ((found1 as u8 * pos1)
+        | ((!found1) as u8 * found2 as u8 * pos2)
+        | ((!found1) as u8 * (!found2) as u8 * remaning.len() as u8)) as usize
 }
 
 #[inline(always)]
 fn parse_next_row(remaning: &[u8]) -> (&[u8], i16, usize) {
-    let end_line = find_new_line_pos(remaning);
+    let end_line = next_newline(remaning);
     let line = &remaning[..end_line];
 
-    let measure_bytes = u8x8::load_or_default(&line[line.len() - 6..]);
+    let measure_bytes = u8x8::load_or_default(&line[end_line - 6..]);
 
-    let delimiter_mask = u8x8::splat(b';');
-    let measure_start_pos = unsafe {
-        measure_bytes
-            .simd_eq(delimiter_mask)
-            .first_set()
-            .unwrap_unchecked()
-    };
+    let measure_start_pos = unsafe { measure_bytes.simd_eq(SEMI).first_set().unwrap_unchecked() };
     let row_delimiter_pos = line.len() - (6 - measure_start_pos);
 
     let digits_mask = u8x8::splat(b'0');
