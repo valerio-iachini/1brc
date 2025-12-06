@@ -124,7 +124,7 @@ fn main() {
     write!(lock, "}}").unwrap();
 }
 
-#[inline(never)]
+#[inline(always)]
 fn chunks(buffer: &[u8], chunk_size: usize) -> Vec<&[u8]> {
     let mut result = vec![];
     let mut i = 0;
@@ -139,7 +139,7 @@ fn chunks(buffer: &[u8], chunk_size: usize) -> Vec<&[u8]> {
     result
 }
 
-#[inline(never)]
+#[inline(always)]
 fn parse_next_row(remaning: &[u8]) -> (&[u8], i16, usize) {
     let (found, end_line, line) = next_newline_part(remaning);
     if found {
@@ -159,21 +159,22 @@ fn parse_next_row(remaning: &[u8]) -> (&[u8], i16, usize) {
     }
 }
 
-#[inline(never)]
+#[inline(always)]
 fn fast_parse_next_row(remaning: &[u8], line: u8x64, end_line: usize) -> (&[u8], i16, usize) {
     let measure_start_pos = unsafe { line.simd_eq(SEMI_64).first_set().unwrap_unchecked() };
     let sign = (line[measure_start_pos + 1] == b'-') as i16;
-    let hundreds_pos = end_line - 4;
-    let hundreds_found = (end_line - measure_start_pos) > (3 + sign as usize);
-    let hundreds = (hundreds_found) as i16 * line[hundreds_pos] as i16 * 100i16;
 
     let digits_mask = u8x64::splat(b'0');
     let measure_parts = line - digits_mask;
 
+    let hundreds_pos = end_line - 4;
+    let hundreds_found = (end_line - measure_start_pos - 1) > (3 + sign as usize);
+    let hundreds = (hundreds_found) as i16 * measure_parts[hundreds_pos] as i16 * 100i16;
+
     let significand =
         hundreds + measure_parts[end_line - 1] as i16 + measure_parts[end_line - 3] as i16 * 10;
 
-    let measure = (significand ^ sign) - sign;
+    let measure = (significand ^ -sign) + sign;
 
     (&remaning[0..measure_start_pos], measure, end_line + 1)
 }
@@ -192,17 +193,17 @@ fn slow_parse_next_row(remaning: &[u8], end_line: usize) -> (&[u8], i16, usize) 
 
     let sign = (measure_bytes[measure_start_pos + 1] == b'-') as i16;
     let hundreds_pos = end_line - 4;
-    let hundreds_found = (end_line - measure_start_pos) > (3 + sign as usize);
+    let hundreds_found = (end_line - measure_start_pos - 1) > (3 + sign as usize);
     let hundreds = (hundreds_found) as i16 * measure_bytes[hundreds_pos] as i16 * 100i16;
 
     let significand = u8x8::from_array([0, 0, 0, 10, 0, 1, 0, 0]) * measure_parts;
     let significand = significand.reduce_sum() as i16 + hundreds;
 
-    let measure = (significand ^ sign) - sign;
+    let measure = (significand ^ -sign) + sign;
     (&line[0..row_delimiter_pos], measure, end_line + 1)
 }
 
-#[inline(never)]
+#[inline(always)]
 fn next_newline_part(chunk: &[u8]) -> (bool, u8, u8x64) {
     let chunk = u8x64::load_or_default(chunk);
 
@@ -213,7 +214,7 @@ fn next_newline_part(chunk: &[u8]) -> (bool, u8, u8x64) {
     (found, pos, chunk)
 }
 
-#[inline(never)]
+#[inline(always)]
 fn next_newline(remaning: &[u8]) -> usize {
     let (found1, pos1, _) = next_newline_part(remaning);
     if found1 {
@@ -225,30 +226,6 @@ fn next_newline(remaning: &[u8]) -> usize {
         ((found2 as u8 * (pos2 + 64)) | ((!found2) as u8 * remaning.len() as u8)) as usize
     }
 }
-
-//#[inline(never)]
-//fn parse_next_row(remaning: &[u8]) -> (&[u8], i16, usize) {
-//    let end_line = next_newline(remaning);
-//    let line = &remaning[..end_line];
-//
-//    let measure_bytes = u8x8::load_or_default(&line[end_line - 6..]);
-//
-//    let measure_start_pos = unsafe { measure_bytes.simd_eq(SEMI).first_set().unwrap_unchecked() };
-//    let row_delimiter_pos = line.len() - (6 - measure_start_pos);
-//
-//    let digits_mask = u8x8::splat(b'0');
-//    let measure_parts = measure_bytes - digits_mask;
-//
-//    let sign = -((measure_parts[measure_start_pos + 1] > 9) as i16);
-//
-//    let hundreds = (measure_parts[2] < 9) as i16 * measure_parts[2] as i16 * 100i16;
-//
-//    let significand = u8x8::from_array([0, 0, 0, 10, 0, 1, 0, 0]) * measure_parts;
-//    let significand = significand.reduce_sum() as i16 + hundreds;
-//
-//    let measure = (significand ^ sign) - sign;
-//    (&line[0..row_delimiter_pos], measure, end_line + 1)
-//}
 
 #[cfg(test)]
 mod test {
